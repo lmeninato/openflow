@@ -65,7 +65,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
     private IDeviceService deviceProv;
     
     // Switch table in which rules should be installed
-    private byte table;
+    static public byte table;
     
     // Map of hosts to devices
     private Map<IDevice,Host> knownHosts;
@@ -119,7 +119,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 	Initialize data structures for Dijkstra's
 	*/
 	private void initializeSwitchDistances(Collection<IOFSwitch> switches,
-										   IOFSwitch switchNode,
+										   IOFSwitch sw,
 										   HashMap<IOFSwitch, Integer> distances,
 										   HashMap<IOFSwitch, IOFSwitch> parents,
 										   PriorityQueue<SwitchPair> pq) {
@@ -129,14 +129,14 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 			parents.put(s, null);
 		}
 
-		distances.put(switchNode, 0);
-		pq.add(new SwitchPair(switchNode, 0));
+		distances.put(sw, 0);
+		pq.add(new SwitchPair(sw, 0));
 
 		for (Link link : getLinks()) {
 			IOFSwitch source = getSwitches().get(link.getSrc());
 			IOFSwitch dest = getSwitches().get(link.getDst());
 
-			if (source == switchNode) {
+			if (source == sw) {
 				distances.put(dest, 1);
 				pq.add(new SwitchPair(dest, 1));
 				parents.put(dest, source);	
@@ -158,37 +158,37 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 		Collection<IOFSwitch> switches = getSwitches().values();
 		HashMap<IOFSwitch, HashMap<IOFSwitch, IOFSwitch>> shortestPaths = new HashMap<IOFSwitch, HashMap<IOFSwitch, IOFSwitch>>();
 
-		for (IOFSwitch switchNode: switches) {
+		for (IOFSwitch sw: switches) {
 
 			PriorityQueue<SwitchPair> pq = new PriorityQueue<SwitchPair>();
 			HashMap<IOFSwitch, IOFSwitch> parents = new HashMap<IOFSwitch, IOFSwitch>();
 			HashMap<IOFSwitch, Integer> distances = new HashMap<IOFSwitch, Integer>();
 			
-			initializeSwitchDistances(switches, switchNode, distances, parents, pq);
+			initializeSwitchDistances(switches, sw, distances, parents, pq);
 
 			Set<IOFSwitch> seen = new HashSet<IOFSwitch>();
 			Integer dist;
-			IOFSwitch currentSwitch;
+			IOFSwitch curr;
 
 			while (!pq.isEmpty()) {
-				currentSwitch = pq.poll().s;
-				seen.add(currentSwitch);
+				curr = pq.poll().s;
+				seen.add(curr);
 				for (Link link : getLinks()) {
 					IOFSwitch source = getSwitches().get(link.getSrc());
-					IOFSwitch adj = getSwitches().get(link.getDst());
+					IOFSwitch neighbor = getSwitches().get(link.getDst());
 
-					if (source == currentSwitch && !seen.contains(adj)) {
-						dist = distances.get(currentSwitch) + 1;
-						if (dist < distances.get(adj)) {
-							distances.put(adj, dist);
-							pq.add(new SwitchPair(adj, dist));
-							parents.put(adj, currentSwitch);
+					if (source == curr && !seen.contains(neighbor)) {
+						dist = distances.get(curr) + 1;
+						if (dist < distances.get(neighbor)) {
+							distances.put(neighbor, dist);
+							pq.add(new SwitchPair(neighbor, dist));
+							parents.put(neighbor, curr);
 						}
 					}
 				}	
 			}
 
-			shortestPaths.put(switchNode, parents);
+			shortestPaths.put(sw, parents);
 		}
 
 		this.allShortestPaths = shortestPaths;
@@ -198,57 +198,58 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 	public OFMatch initializeOFMatch(Host host) {
 		OFMatch ofm = new OFMatch();
 		ArrayList<OFMatchField> fields = new ArrayList<OFMatchField>();
-		
-		OFMatchField etherType = new OFMatchField(OFOXMFieldType.ETH_TYPE, Ethernet.TYPE_IPv4);
-		OFMatchField macAddr = new OFMatchField(OFOXMFieldType.ETH_DST, Ethernet.toByteArray(host.getMACAddress()));
 
-		fields.add(etherType);
-		fields.add(macAddr);
+		// add ethernet type
+		fields.add(new OFMatchField(OFOXMFieldType.ETH_TYPE, Ethernet.TYPE_IPv4));
+		// add mac address
+		fields.add(new OFMatchField(OFOXMFieldType.ETH_DST, Ethernet.toByteArray(host.getMACAddress())));
 
 		ofm.setMatchFields(fields);
 
 		return ofm;
 	}
 
-	public ArrayList<OFInstruction> getInstructionList(Host host, IOFSwitch IOFSwitch) {
+	public ArrayList<OFInstruction> getInstructionList(Host host, IOFSwitch sw) {
 		IOFSwitch hostSwitch = host.getSwitch();
-		OFActionOutput ofaOutput = new OFActionOutput();
+		OFActionOutput ofa = new OFActionOutput();
 
-		if (IOFSwitch.getId() != hostSwitch.getId()) {
+		if (sw.getId() != hostSwitch.getId()) {
 
-			IOFSwitch nextSwitch = this.allShortestPaths.get(hostSwitch).get(IOFSwitch);
+			IOFSwitch nextSwitch = this.allShortestPaths.get(hostSwitch).get(sw);
 
 			for(Link link : getLinks()) {
-				if (IOFSwitch.getId() == link.getSrc()) {
+				if (sw.getId() == link.getSrc()) {
 					if (nextSwitch.getId() == link.getDst()){
-						ofaOutput.setPort(link.getSrcPort());
+						ofa.setPort(link.getSrcPort());
 					}
 				}
 			}
 
 		} else {
-			ofaOutput.setPort(host.getPort());
+			ofa.setPort(host.getPort());
 		}
 
-		ArrayList<OFAction> actionList = new ArrayList<OFAction>();
+		ArrayList<OFAction> actions = new ArrayList<OFAction>();
 		ArrayList<OFInstruction> instructions = new ArrayList<OFInstruction>();
 
-		actionList.add(ofaOutput);
-		OFInstructionApplyActions actions = new OFInstructionApplyActions(actionList);
-		instructions.add(actions);
+		actions.add(ofa);
+		OFInstructionApplyActions actionsToApply = new OFInstructionApplyActions(actions);
+		instructions.add(actionsToApply);
 
 		return instructions;
 	}
 
 	public void setTables(Host host) {
 
-		// only consider hosts that are connected to the network topology	
-		if (host.isAttachedToSwitch()) {		
-			OFMatch ofm = initializeOFMatch(host);
-			for (IOFSwitch IOFSwitch : getSwitches().values()) {
-				ArrayList<OFInstruction> instructions = getInstructionList(host, IOFSwitch);
-				SwitchCommands.installRule(IOFSwitch, this.table, SwitchCommands.DEFAULT_PRIORITY, ofm, instructions);
-			}
+		// only consider hosts that are connected to the network topology
+		if (!host.isAttachedToSwitch()) {
+			return;
+		}
+
+		OFMatch ofm = initializeOFMatch(host);
+		for (IOFSwitch sw : getSwitches().values()) {
+			ArrayList<OFInstruction> instructions = getInstructionList(host, sw);
+			SwitchCommands.installRule(sw, this.table, SwitchCommands.DEFAULT_PRIORITY, ofm, instructions);
 		}
 	}
 
@@ -261,8 +262,8 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 	public void deleteTablesForHost(Host host) {
 		OFMatch ofm = initializeOFMatch(host);
 		
-		for (IOFSwitch IOFSwitch : getSwitches().values()) {
-			SwitchCommands.removeRules(IOFSwitch, this.table, ofm);
+		for (IOFSwitch sw : getSwitches().values()) {
+			SwitchCommands.removeRules(sw, this.table, ofm);
 		}
 	}
 
