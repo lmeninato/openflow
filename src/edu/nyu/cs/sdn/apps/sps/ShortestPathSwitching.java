@@ -4,6 +4,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.PriorityQueue;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -12,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import edu.nyu.cs.sdn.apps.util.Host;
+import edu.nyu.cs.sdn.apps.util.SwitchCommands;
 
 import net.floodlightcontroller.core.IFloodlightProviderService;
 import net.floodlightcontroller.core.IOFSwitch;
@@ -27,7 +32,20 @@ import net.floodlightcontroller.devicemanager.IDeviceListener;
 import net.floodlightcontroller.devicemanager.IDeviceService;
 import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryListener;
 import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryService;
+import net.floodlightcontroller.packet.Ethernet;
 import net.floodlightcontroller.routing.Link;
+
+
+import org.openflow.protocol.action.OFAction;
+import org.openflow.protocol.action.OFActionOutput;
+import org.openflow.protocol.instruction.OFInstruction;
+import org.openflow.protocol.instruction.OFInstructionApplyActions;
+import org.openflow.protocol.instruction.OFInstructionType;
+import org.openflow.protocol.OFMatch;
+import org.openflow.protocol.OFMatchField;
+import org.openflow.protocol.OFOXMFieldType;
+
+
 
 public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListener, 
 		ILinkDiscoveryListener, IDeviceListener, InterfaceShortestPathSwitching
@@ -52,6 +70,9 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
     // Map of hosts to devices
     private Map<IDevice,Host> knownHosts;
 
+	// Store shortest paths from a switch to all other switches
+	public HashMap<IOFSwitch, HashMap<IOFSwitch, IOFSwitch>> allShortestPaths;
+
 	/**
      * Loads dependencies and initializes data structures.
      */
@@ -72,8 +93,191 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         
         /*********************************************************************/
         /* TODO: Initialize other class variables, if necessary              */
-        
+
+        this.allShortestPaths = new HashMap<IOFSwitch, HashMap<IOFSwitch, IOFSwitch>>();
+
         /*********************************************************************/
+	}
+
+	public class SwitchPair implements Comparable<SwitchPair> {
+
+		IOFSwitch s;
+		Integer cost;
+	
+		SwitchPair(IOFSwitch s, Integer cost) {
+			this.s = s;
+			this.cost = cost;
+		}
+	
+		@Override
+		public int compareTo(SwitchPair o) {
+			return this.cost - o.cost;
+		}
+	}
+
+	/*
+	Initialize data structures for Dijkstra's
+	*/
+	private void initializeSwitchDistances(Collection<IOFSwitch> switches,
+										   IOFSwitch switchNode,
+										   HashMap<IOFSwitch, Integer> distances,
+										   HashMap<IOFSwitch, IOFSwitch> parents,
+										   PriorityQueue<SwitchPair> pq) {
+		for (IOFSwitch s : switches) {
+			distances.put(s, Integer.MAX_VALUE);
+			pq.add(new SwitchPair(s, Integer.MAX_VALUE));
+			parents.put(s, null);
+		}
+
+		distances.put(switchNode, 0);
+		pq.add(new SwitchPair(switchNode, 0));
+
+		for (Link link : getLinks()) {
+			IOFSwitch source = getSwitches().get(link.getSrc());
+			IOFSwitch dest = getSwitches().get(link.getDst());
+
+			if (source == switchNode) {
+				distances.put(dest, 1);
+				pq.add(new SwitchPair(dest, 1));
+				parents.put(dest, source);	
+			} 
+		}
+	}
+	
+	/**
+	 *
+	 * Compute Dijkstras on every node in the network topology
+	 * 
+	 * Link costs are assumed to be 1
+	 * 
+	 * sets allShortestPaths to hashmap where {switch -> {switch1 -> parent1, switch2 -> parent2, ...}}
+	 * So to look up the shortest path from A to B, we keep looking up the shortest paths object until the parent is B.
+	 */
+	public void computeAllShortestPaths() {
+
+		Collection<IOFSwitch> switches = getSwitches().values();
+		HashMap<IOFSwitch, HashMap<IOFSwitch, IOFSwitch>> shortestPaths = new HashMap<IOFSwitch, HashMap<IOFSwitch, IOFSwitch>>();
+
+		for (IOFSwitch switchNode: switches) {
+
+			PriorityQueue<SwitchPair> pq = new PriorityQueue<SwitchPair>();
+			HashMap<IOFSwitch, IOFSwitch> parents = new HashMap<IOFSwitch, IOFSwitch>();
+			HashMap<IOFSwitch, Integer> distances = new HashMap<IOFSwitch, Integer>();
+			
+			initializeSwitchDistances(switches, switchNode, distances, parents, pq);
+
+			Set<IOFSwitch> seen = new HashSet<IOFSwitch>();
+			Integer dist;
+			IOFSwitch currentSwitch;
+
+			while (!pq.isEmpty()) {
+				currentSwitch = pq.poll().s;
+				seen.add(currentSwitch);
+				for (Link link : getLinks()) {
+					IOFSwitch source = getSwitches().get(link.getSrc());
+					IOFSwitch adj = getSwitches().get(link.getDst());
+
+					if (source == currentSwitch && !seen.contains(adj)) {
+						dist = distances.get(currentSwitch) + 1;
+						if (dist < distances.get(adj)) {
+							distances.put(adj, dist);
+							pq.add(new SwitchPair(adj, dist));
+							parents.put(adj, currentSwitch);
+						}
+					}
+				}	
+			}
+
+			shortestPaths.put(switchNode, parents);
+		}
+
+		this.allShortestPaths = shortestPaths;
+	}
+
+
+	public OFMatch initializeOFMatch(Host host) {
+		OFMatch ofm = new OFMatch();
+		ArrayList<OFMatchField> fields = new ArrayList<OFMatchField>();
+		
+		OFMatchField etherType = new OFMatchField(OFOXMFieldType.ETH_TYPE, Ethernet.TYPE_IPv4);
+		OFMatchField macAddr = new OFMatchField(OFOXMFieldType.ETH_DST, Ethernet.toByteArray(host.getMACAddress()));
+
+		fields.add(etherType);
+		fields.add(macAddr);
+
+		ofm.setMatchFields(fields);
+
+		return ofm;
+	}
+
+	public ArrayList<OFInstruction> getInstructionList(Host host, IOFSwitch IOFSwitch) {
+		IOFSwitch hostSwitch = host.getSwitch();
+		OFActionOutput ofaOutput = new OFActionOutput();
+
+		if (IOFSwitch.getId() != hostSwitch.getId()) {
+
+			IOFSwitch nextSwitch = this.allShortestPaths.get(hostSwitch).get(IOFSwitch);
+
+			for(Link link : getLinks()) {
+				if (IOFSwitch.getId() == link.getSrc()) {
+					if (nextSwitch.getId() == link.getDst()){
+						ofaOutput.setPort(link.getSrcPort());
+					}
+				}
+			}
+
+		} else {
+			ofaOutput.setPort(host.getPort());
+		}
+
+		ArrayList<OFAction> actionList = new ArrayList<OFAction>();
+		ArrayList<OFInstruction> instructions = new ArrayList<OFInstruction>();
+
+		actionList.add(ofaOutput);
+		OFInstructionApplyActions actions = new OFInstructionApplyActions(actionList);
+		instructions.add(actions);
+
+		return instructions;
+	}
+
+	public void setTables(Host host) {
+
+		// only consider hosts that are connected to the network topology	
+		if (host.isAttachedToSwitch()) {		
+			OFMatch ofm = initializeOFMatch(host);
+			for (IOFSwitch IOFSwitch : getSwitches().values()) {
+				ArrayList<OFInstruction> instructions = getInstructionList(host, IOFSwitch);
+				SwitchCommands.installRule(IOFSwitch, this.table, SwitchCommands.DEFAULT_PRIORITY, ofm, instructions);
+			}
+		}
+	}
+
+	public void setAllTables() {
+		for(Host host : getHosts()) {
+			setTables(host);
+		}
+	}
+
+	public void deleteTablesForHost(Host host) {
+		OFMatch ofm = initializeOFMatch(host);
+		
+		for (IOFSwitch IOFSwitch : getSwitches().values()) {
+			SwitchCommands.removeRules(IOFSwitch, this.table, ofm);
+		}
+	}
+
+
+	public void deleteAllTables() {
+		for (Host host : getHosts()) {
+			deleteTablesForHost(host);
+		}
+		
+	}
+
+	public void rebuildAllTables() {
+		deleteAllTables();
+		computeAllShortestPaths();
+		setAllTables();
 	}
 
 	/**
@@ -87,11 +291,6 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 		this.floodlightProv.addOFSwitchListener(this);
 		this.linkDiscProv.addListener(this);
 		this.deviceProv.addListener(this);
-		
-		/*********************************************************************/
-		/* TODO: Perform other tasks, if necessary                           */
-		
-		/*********************************************************************/
 	}
 	
 	/**
@@ -135,7 +334,8 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 			
 			/*****************************************************************/
 			/* TODO: Update routing: add rules to route to new host          */
-			
+			computeAllShortestPaths();
+			setTables(host);
 			/*****************************************************************/
 		}
 	}
@@ -159,7 +359,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 		
 		/*********************************************************************/
 		/* TODO: Update routing: remove rules to route to host               */
-		
+		deleteTablesForHost(host);
 		/*********************************************************************/
 	}
 
@@ -187,7 +387,8 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 		
 		/*********************************************************************/
 		/* TODO: Update routing: change rules to route to host               */
-		
+		deleteTablesForHost(host);
+		setTables(host);
 		/*********************************************************************/
 	}
 	
@@ -203,7 +404,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 		
 		/*********************************************************************/
 		/* TODO: Update routing: change routing rules for all hosts          */
-
+		rebuildAllTables();
 		/*********************************************************************/
 	}
 
@@ -219,7 +420,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 		
 		/*********************************************************************/
 		/* TODO: Update routing: change routing rules for all hosts          */
-		
+		rebuildAllTables();
 		/*********************************************************************/
 	}
 
@@ -250,7 +451,8 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 		
 		/*********************************************************************/
 		/* TODO: Update routing: change routing rules for all hosts          */
-		
+		computeAllShortestPaths();
+		setAllTables();
 		/*********************************************************************/
 	}
 
