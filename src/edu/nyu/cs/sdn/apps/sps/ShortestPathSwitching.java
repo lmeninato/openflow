@@ -245,7 +245,8 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 		OFMatch ofm = initializeOFMatch(host);
 		for (IOFSwitch sw : getSwitches().values()) {
 			ArrayList<OFInstruction> instructions = getInstructionList(host, sw);
-			SwitchCommands.installRule(sw, this.table, SwitchCommands.DEFAULT_PRIORITY, ofm, instructions);
+			SwitchCommands.installRule(sw, this.table, SwitchCommands.DEFAULT_PRIORITY, ofm, instructions,
+					SwitchCommands.NO_TIMEOUT, SwitchCommands.NO_TIMEOUT);
 		}
 	}
 

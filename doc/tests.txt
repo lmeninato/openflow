@@ -1,0 +1,13 @@
+For testing, usually I would try to have more robust unit testing (i.e. ensure that methods do what they are designed to do), but 
+since this is just a class project, I mostly used print debugging to ensure that my methods did what they were intented to do.
+
+To test the overall connectivity of my program, I would run my program with: 
+
+java -jar FloodlightWithApps.jar -cf loadbalancer.prop
+
+And then in another terminal I would run the mininet client with:
+
+sudo python ./run_mininet.py assign1
+
+Then I would run pingall to check that all switches and hosts were reachable in the network.
+If anything behaved unexpectedly, I could use the Java debugger to inspect individual packets in a simple network.

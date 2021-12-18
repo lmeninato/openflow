@@ -1,0 +1,11 @@
+Part 3:
+
+One vulnerability in part 3 is that I assume that path weights are the same across the network.
+If a switch was heavily congested, and began dropping pockets, it might be better to have a dynamic
+path weight according to the actual network traffic.
+
+Part 4:
+
+A common vulnerability in computer networks is that they can be subjet to distributed denial-of-service attacks (DDOS). 
+In order to protect against malicious packets being sent towards the network, we would want a way to track 
+malicious IPs and create rules to protect against nefarious activity.
